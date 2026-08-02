@@ -1,0 +1,931 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Rocketman - Costa Games</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; overflow: hidden;
+    background: #05040c;
+    width: 100%; height: 100%;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    font-family: 'Courier New', monospace;
+  }
+  canvas { display: block; touch-action: none; }
+  #loadingWrap {
+    position: fixed; inset: 0; z-index: 30; background:#05040c;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    color:#6bd0ff; letter-spacing:3px; font-family:'Courier New',monospace;
+  }
+  #loadingWrap .bar { width:220px; height:10px; border:2px solid #6bd0ff; margin-top:14px; }
+  #loadingWrap .fill { height:100%; width:0%; background:#6bd0ff; }
+</style>
+</head>
+<body>
+
+<div id="loadingWrap">
+  <div>CARREGANDO ROCKETMAN...</div>
+  <div class="bar"><div class="fill" id="loadFill"></div></div>
+</div>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/addons/p5.sound.min.js"></script>
+<script>
+/* =========================================================================
+   ROCKETMAN — jogo em p5.js usando os assets originais (heroi, fundos, obstáculos)
+   Produzido por Costa Games
+   ========================================================================= */
+
+// ---------- ESTADOS ----------
+const ST_MENU='MENU', ST_NICK='NICK', ST_BOOST='BOOST', ST_LAUNCH='LAUNCH',
+      ST_FLIGHT='FLIGHT', ST_FALL='FALL', ST_OVER='OVER';
+let state = ST_MENU;
+
+// ---------- LAYOUT (campo vertical centralizado — funciona desktop e mobile) ----------
+let W = 420, H = 800, offsetX = 0;
+function computeLayout() {
+  W = Math.min(windowWidth, 560);
+  H = windowHeight;
+  offsetX = (windowWidth - W) / 2;
+}
+
+// ---------- ASSETS ----------
+let img = {}; // imagens carregadas
+const ASSET_LIST = [
+  ['heroi','assets/heroi.png'],
+  ['fundo1','assets/fundo1.jpg'],  // solo / grama (menu, boost)
+  ['fundo2','assets/fundo2.jpg'],  // céu claro dia
+  ['fundo3','assets/fundo3.jpg'],  // céu dia com brilho
+  ['fundo4','assets/fundo4.jpg'],  // camada de nuvens densas
+  ['fundo5','assets/fundo5.jpg'],  // crepúsculo / transição espaço
+  ['fundo6','assets/fundo6.jpg'],  // borda da atmosfera
+  ['fundo7','assets/fundo7.jpg'],  // espaço profundo
+  ['ob1','assets/ob1.png'],        // balão
+  ['ob2','assets/ob2.png'],        // pássaro
+  ['ob3','assets/ob3.png'],        // ovni
+  ['ob4','assets/ob4.png'],        // meteoro
+];
+const TOTAL_ASSETS = ASSET_LIST.length;
+let assetsLoaded = 0;
+function preload() {
+  for (const [key, path] of ASSET_LIST) {
+    img[key] = loadImage(path,
+      () => { assetsLoaded++; updateLoadingBar(); },
+      () => { assetsLoaded++; updateLoadingBar(); console.warn('Falhou ao carregar', path); }
+    );
+  }
+}
+function updateLoadingBar() {
+  const pct = Math.round((assetsLoaded/TOTAL_ASSETS)*100);
+  const fill = document.getElementById('loadFill');
+  if (fill) fill.style.width = pct+'%';
+  if (assetsLoaded >= TOTAL_ASSETS) {
+    const w = document.getElementById('loadingWrap');
+    if (w) w.style.display = 'none';
+  }
+}
+
+// ---------- DADOS PERSISTENTES ----------
+let nickname = '';
+let highScore = 0;
+let leaderboard = [];
+function loadSave() {
+  nickname = localStorage.getItem('rocketman_nick') || '';
+  highScore = parseFloat(localStorage.getItem('rocketman_hs') || '0');
+  try { leaderboard = JSON.parse(localStorage.getItem('rocketman_board') || '[]'); }
+  catch(e){ leaderboard = []; }
+}
+function saveScore(alt) {
+  alt = Math.floor(alt);
+  if (alt > highScore) { highScore = alt; localStorage.setItem('rocketman_hs', String(highScore)); }
+  leaderboard.push({ name: nickname || 'PILOTO', alt: alt, date: Date.now() });
+  leaderboard.sort((a,b)=>b.alt-a.alt);
+  leaderboard = leaderboard.slice(0,5);
+  localStorage.setItem('rocketman_board', JSON.stringify(leaderboard));
+}
+
+// ---------- ÁUDIO (efeitos sintetizados via p5.sound + trilhas reais via <audio> nativo) ----------
+let audioReady = false;
+let engineOsc, engineNoise;
+let ambientStarted = false;
+let audioEls = {}; // <audio> nativos: ambiente, gameover, inicio
+
+function setupAudioElements() {
+  audioEls.ambiente = new Audio('assets/ambiente.mp3');
+  audioEls.ambiente.loop = true;
+  audioEls.ambiente.volume = 0.28;
+  audioEls.ambiente.preload = 'auto';
+
+  audioEls.gameover = new Audio('assets/gameover.mp3');
+  audioEls.gameover.volume = 0.8;
+  audioEls.gameover.preload = 'auto';
+
+  audioEls.inicio = new Audio('assets/inicio.mp3');
+  audioEls.inicio.volume = 0.7;
+  audioEls.inicio.preload = 'auto';
+}
+
+function initAudio() {
+  if (audioReady) return;
+  userStartAudio();
+  engineOsc = new p5.Oscillator('sawtooth'); engineOsc.freq(60); engineOsc.amp(0); engineOsc.start();
+  engineNoise = new p5.Noise('brown'); engineNoise.amp(0); engineNoise.start();
+  audioReady = true;
+  playAmbient();
+}
+function playAmbient() {
+  if (ambientStarted) return;
+  if (!audioEls.ambiente) return;
+  ambientStarted = true;
+  let p = audioEls.ambiente.play();
+  if (p && p.catch) p.catch(()=>{}); // ignora bloqueio de autoplay, já estamos num gesto do usuário
+}
+function blip(freq, dur, type, vol) {
+  if (!audioReady) return;
+  let o = new p5.Oscillator(type || 'square');
+  let e = new p5.Envelope();
+  e.setADSR(0.005, dur*0.4, 0.0, dur*0.4);
+  e.setRange(vol || 0.25, 0);
+  o.freq(freq); o.amp(0); o.start();
+  e.play(o);
+  setTimeout(()=>o.stop(), (dur+0.3)*1000);
+}
+function sndTap(pitch) { blip(340 + pitch*4, 0.07, 'square', 0.18); }
+function sndClick() { blip(440, 0.08, 'triangle', 0.22); }
+function sndLaunch() {
+  if (!audioReady) return;
+  let o = new p5.Oscillator('sawtooth');
+  let e = new p5.Envelope(); e.setADSR(0.05, 0.9, 0.1, 0.6); e.setRange(0.3, 0);
+  o.amp(0); o.start(); o.freq(80);
+  let t0 = millis();
+  let sweep = setInterval(()=>{
+    let k = (millis()-t0)/900;
+    if (k>=1) { clearInterval(sweep); return; }
+    o.freq(80 + k*500);
+  }, 30);
+  e.play(o);
+  setTimeout(()=>o.stop(), 1500);
+}
+function sndHit() {
+  if (!audioReady) return;
+  let n = new p5.Noise('white');
+  let ne = new p5.Envelope(); ne.setADSR(0.001,0.25,0,0.1); ne.setRange(0.35,0);
+  n.amp(0); n.start(); ne.play(n); setTimeout(()=>n.stop(), 500);
+  let o = new p5.Oscillator('sine');
+  let e = new p5.Envelope(); e.setADSR(0.001,0.3,0,0.1); e.setRange(0.4,0);
+  o.freq(70); o.amp(0); o.start(); e.play(o); setTimeout(()=>o.stop(), 500);
+}
+function sndGameOver() {
+  if (!audioEls.gameover) return;
+  try {
+    audioEls.gameover.currentTime = 0;
+    let p = audioEls.gameover.play();
+    if (p && p.catch) p.catch(()=>{});
+  } catch(e) {}
+}
+function sndInicio() {
+  if (!audioEls.inicio) return;
+  try {
+    audioEls.inicio.currentTime = 0;
+    let p = audioEls.inicio.play();
+    if (p && p.catch) p.catch(()=>{});
+  } catch(e) {}
+}
+function updateEngineSound() {
+  if (!audioReady) return;
+  if (state === ST_FLIGHT || state === ST_FALL) {
+    let target = 0.10 + 0.12 * constrain(rocket.fuel/rocket.maxFuel, 0, 1);
+    engineOsc.amp(target, 0.1);
+    engineOsc.freq(55 + 30*constrain(rocket.fuel/rocket.maxFuel,0,1));
+    engineNoise.amp(0.05, 0.1);
+  } else {
+    engineOsc.amp(0, 0.3);
+    engineNoise.amp(0, 0.3);
+  }
+}
+
+// ---------- UTIL: texto pixelado ----------
+function pixelText(txt, x, y, size, colMain, colShadow, align) {
+  push();
+  textFont('monospace'); textStyle(BOLD);
+  textAlign(align || CENTER, CENTER);
+  textSize(size);
+  noStroke();
+  fill(colShadow || color(0,0,0,180));
+  text(txt, x + size*0.06, y + size*0.09);
+  fill(colMain);
+  text(txt, x, y);
+  pop();
+}
+
+// ---------- SEQUÊNCIA DE FUNDOS (baseada no TEMPO DE VOO, não na altitude) ----------
+// Fica de dia por ~30s (repetindo fundo2/fundo3 em sequência), depois segue
+// a sequência exata dos fundos rumo ao espaço, na ordem numérica dos arquivos.
+const DAY_KEYS = ['fundo2', 'fundo3'];
+const DAY_SEGMENT = 10;   // segundos que cada fundo de dia fica na tela
+const DAY_TOTAL = 30;     // segundos totais de dia antes de seguir pro espaço
+const SPACE_SEGMENT = 20; // segundos de cada fundo depois do dia (fundo4,5,6)
+
+const STAGES = (function buildStages() {
+  let stages = [];
+  let t = 0;
+  let i = 0;
+  while (t < DAY_TOTAL) {
+    stages.push({ key: DAY_KEYS[i % DAY_KEYS.length], from: t, to: t + DAY_SEGMENT });
+    t += DAY_SEGMENT;
+    i++;
+  }
+  for (const key of ['fundo4', 'fundo5', 'fundo6']) {
+    stages.push({ key, from: t, to: t + SPACE_SEGMENT });
+    t += SPACE_SEGMENT;
+  }
+  stages.push({ key: 'fundo7', from: t, to: Infinity }); // espaço profundo — permanece
+  return stages;
+})();
+
+function currentStageInfo(t) {
+  for (let i=0;i<STAGES.length;i++) {
+    let s = STAGES[i];
+    if (t < s.to || i===STAGES.length-1) {
+      let next = STAGES[min(i+1, STAGES.length-1)];
+      let transitionW = 2; // segundos de crossfade entre fundos
+      let blend = 0;
+      if (t > s.to - transitionW && i < STAGES.length-1) {
+        blend = constrain(map(t, s.to-transitionW, s.to, 0, 1), 0, 1);
+      }
+      return { idx:i, cur:s, next:next, blend:blend };
+    }
+  }
+  return { idx:0, cur:STAGES[0], next:STAGES[1], blend:0 };
+}
+
+function drawCoverImage(im, alpha, scrollT) {
+  if (!im || !im.width) return;
+  push();
+  let scaleF = max(W/im.width, H/im.height) * 1.15; // overscan extra p/ a deriva não estourar a borda
+  let iw = im.width*scaleF, ih = im.height*scaleF;
+  imageMode(CENTER);
+  tint(255, alpha===undefined?255:alpha);
+  let driftX = sin((scrollT||0)*0.10) * W*0.02;
+  if (scrollT === undefined) {
+    image(im, W/2 + driftX, H/2, iw, ih);
+  } else {
+    // scroll vertical contínuo e sem costura — dá a sensação real de estar subindo
+    let scrollPxPerSec = 16;
+    let offset = (scrollT * scrollPxPerSec) % ih;
+    image(im, W/2 + driftX, H/2 + offset, iw, ih);
+    image(im, W/2 + driftX, H/2 + offset - ih, iw, ih);
+  }
+  noTint();
+  pop();
+}
+function drawBackground(t) {
+  push();
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(0,0,W,H);
+  drawingContext.clip();
+  let info = currentStageInfo(t);
+  drawCoverImage(img[info.cur.key], 255, t);
+  if (info.blend > 0) drawCoverImage(img[info.next.key], info.blend*255, t);
+  drawingContext.restore();
+  pop();
+}
+function drawGroundBackground() {
+  push();
+  drawingContext.save();
+  drawingContext.beginPath();
+  drawingContext.rect(0,0,W,H);
+  drawingContext.clip();
+  drawCoverImage(img.fundo1, 255, frameCount*0.012); // deriva lenta e contínua também no solo
+  drawingContext.restore();
+  pop();
+}
+
+// estrelas extra (só desenhadas por cima do espaço profundo p/ reforçar cintilação)
+let stars = [];
+function genStars() {
+  stars = [];
+  for (let i=0;i<60;i++) stars.push({ x: random(W), y: random(H), r: random(0.6,2.2), sp: random(0.02,0.06), ph: random(TWO_PI) });
+}
+function drawTwinkles(t) {
+  let info = currentStageInfo(t);
+  let inSpace = (info.cur.key==='fundo6' || info.cur.key==='fundo7' || (info.blend>0 && (info.next.key==='fundo6'||info.next.key==='fundo7')));
+  if (!inSpace) return;
+  noStroke();
+  for (let s of stars) {
+    let a = 120+100*sin(frameCount*s.sp+s.ph);
+    fill(255,255,255,a);
+    ellipse(s.x, s.y, s.r, s.r);
+  }
+}
+
+// ---------- FOGUETE ----------
+class Rocket {
+  constructor() {
+    this.x = W/2; this.y = H*0.72;
+    this.vx = 0; this.vy = 0;
+    this.maxFuel = 0; this.fuel = 0;
+    this.hitTimer = 0; this.invuln = 0;
+    this.angleWobble = 0;
+    this.dispH = 92;
+    this.r = 26;
+    this.crashed = false;
+  }
+  update(dt) {
+    if (dragTarget) {
+      // toque/arraste: o foguete segue o dedo diretamente (com uma leve suavização)
+      let dx = dragTarget.x - this.x, dy = dragTarget.y - this.y;
+      this.vx = dx * 0.9;
+      this.vy = dy * 0.9;
+      this.x += this.vx * dt * 0.35;
+      this.y += this.vy * dt * 0.35;
+    } else {
+      // teclado: velocidade direta nas setas/WASD
+      let ax = 0, ay = 0;
+      if (keyIsPressed) {
+        if (keyIsDown(LEFT_ARROW) || keyIsDown(65)) ax -= 1;
+        if (keyIsDown(RIGHT_ARROW) || keyIsDown(68)) ax += 1;
+        if (keyIsDown(UP_ARROW) || keyIsDown(87)) ay -= 1;
+        if (keyIsDown(DOWN_ARROW) || keyIsDown(83)) ay += 1;
+      }
+      this.vx = ax * 6.5;
+      this.vy = ay * 6.5;
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+    }
+    this.x = constrain(this.x, 34, W-34);
+    this.y = constrain(this.y, H*0.16, H*0.92);
+    this.angleWobble = constrain(this.vx*0.02, -0.3, 0.3);
+    if (this.hitTimer > 0) this.hitTimer -= dt;
+    if (this.invuln > 0) this.invuln -= dt;
+  }
+  draw() {
+    if (this.crashed) return; // explodiu — não desenha mais o sprite
+    push();
+    translate(this.x, this.y);
+    rotate(this.angleWobble);
+    // (sem rotação extra — o sprite já nasce com o bico pra cima)
+
+    // chama do motor (procedural, atrás do sprite)
+    if (state===ST_FLIGHT || state===ST_LAUNCH) {
+      let fFrac = constrain(this.fuel/max(this.maxFuel,1),0,1);
+      let flameLen = 16 + 26*fFrac + random(-4,4);
+      let fy = this.dispH*0.42;
+      noStroke();
+      fill(255,170,50,200); triangle(-10,fy, 10,fy, 0,fy+flameLen*0.65);
+      fill(255,220,110,220); triangle(-5,fy, 5,fy, 0,fy+flameLen);
+      fill(255,255,220,230); triangle(-2,fy, 2,fy, 0,fy+flameLen*0.5);
+    }
+
+    imageMode(CENTER);
+    let iw = img.heroi.width, ih = img.heroi.height;
+    let scaleF = this.dispH/ih;
+    tint(255,255);
+    image(img.heroi, 0, 0, iw*scaleF, ih*scaleF);
+    noTint();
+    pop();
+  }
+}
+let rocket;
+let dragTarget = null;
+
+
+// ---------- OBSTÁCULOS (mapeados para os assets fornecidos) ----------
+// ordem de dificuldade: pássaro < balão < meteoro < ovni
+// mapeia cada fundo para um "nível" de dificuldade de obstáculos (0=fácil .. 5=espaço profundo)
+const BAND_LEVEL = { fundo2:0, fundo3:1, fundo4:2, fundo5:3, fundo6:4, fundo7:5 };
+
+const OBS_TYPES = {
+  bird:    { key:'ob2', dmg:80,  speed:[1.0,1.8], dispW:60,  bands:[0,1],       orient:'horizontal' },
+  balloon: { key:'ob1', dmg:120, speed:[0.5,1.1], dispW:56,  bands:[0,1,2],     orient:'vertical' },
+  meteor:  { key:'ob4', dmg:210, speed:[3.0,5.0], dispW:70,  bands:[2,3,4,5],   orient:'vertical' },
+  ufo:     { key:'ob3', dmg:250, speed:[2.2,3.8], dispW:78,  bands:[3,4,5],     orient:'horizontal' },
+};
+function pickObstacleType(bandIdx) {
+  let pool = [];
+  for (const [name, def] of Object.entries(OBS_TYPES)) {
+    if (def.bands.includes(bandIdx)) pool.push(name);
+  }
+  if (pool.length===0) pool = ['bird'];
+  return random(pool);
+}
+let obstacles = [];
+let spawnTimer = 0;
+
+class Obstacle {
+  constructor(type, bandIdx, altitude) {
+    this.type = type;
+    let def = OBS_TYPES[type];
+    this.def = def;
+    let image_ = img[def.key];
+    let srcAr = image_.height/image_.width; // <1 = imagem de origem é "deitada"
+    let sourceIsHorizontal = srcAr < 1;
+    this.moveHorizontal = (def.orient === 'horizontal'); // ob2/ob3: atravessam de lado
+    let wantHorizontal = def.orient === 'horizontal';
+    // só gira 90° quando a orientação visual desejada é diferente da orientação da imagem original
+    this.rotate90 = (wantHorizontal === sourceIsHorizontal) ? false : true;
+    if (this.rotate90) {
+      this.h = def.dispW; this.w = def.dispW * srcAr;
+    } else {
+      this.w = def.dispW; this.h = def.dispW * srcAr;
+    }
+    let diffMul = 1 + constrain(altitude/24000, 0, 2.4);
+    this.speed = random(def.speed[0], def.speed[1]) * diffMul;
+    this.dmg = def.dmg;
+    this.phase = random(TWO_PI);
+    this.erratic = (type==='ufo');
+    this.dead = false;
+
+    if (this.moveHorizontal) {
+      // entra por um dos lados da tela e atravessa horizontalmente
+      this.fromLeft = random() < 0.5;
+      this.x = this.fromLeft ? -this.w : W + this.w;
+      this.y = random(H*0.10, H*0.55);
+      this.vx = (this.fromLeft ? 1 : -1) * this.speed;
+      this.vy = random(-0.3, 0.3); // leve deriva vertical
+    } else {
+      // cai de cima pra baixo (comportamento padrão)
+      this.x = random(this.w, W-this.w);
+      this.y = -this.h;
+      this.vx = random(-0.6,0.6) * diffMul;
+    }
+  }
+  update(dt, scrollSpeed) {
+    if (this.moveHorizontal) {
+      this.x += this.vx * dt;
+      this.y += (this.vy + scrollSpeed*0.35) * dt; // acompanha um pouco a subida do foguete
+      if (this.erratic && frameCount % 40 === 0) this.vy = random(-1.2,1.2);
+      if ((this.fromLeft && this.x > W+this.w) || (!this.fromLeft && this.x < -this.w) || this.y > H+this.h) this.dead = true;
+    } else {
+      this.y += (this.speed + scrollSpeed) * dt;
+      this.phase += 0.05*dt;
+      this.x += sin(this.phase)*0.5*dt + this.vx*dt;
+      this.x = constrain(this.x, this.w/2, W-this.w/2);
+      if (this.y > H+this.h) this.dead = true;
+    }
+  }
+  hitRadius() { return (this.w+this.h)/4.6; }
+  draw() {
+    push();
+    translate(this.x,this.y);
+    if (this.rotate90) {
+      rotate(HALF_PI);
+      imageMode(CENTER);
+      image(img[this.def.key], 0, 0, this.h, this.w); // dimensões trocadas por causa do giro
+    } else {
+      if (this.type==='bird') {
+        let dir = this.vx >= 0 ? 1 : -1;
+        scale(dir,1);
+      }
+      imageMode(CENTER);
+      image(img[this.def.key], 0, 0, this.w, this.h);
+    }
+    pop();
+  }
+}
+
+// ---------- PARTÍCULAS (explosão) ----------
+let particles = [];
+function spawnExplosion(x,y,n,cols) {
+  for (let i=0;i<n;i++) {
+    particles.push({ x:x,y:y, vx:random(-4,4), vy:random(-4,4), life:random(20,40), maxLife:40, r:random(3,8), col:random(cols) });
+  }
+}
+function updateParticles(dt) {
+  for (let i=particles.length-1;i>=0;i--) {
+    let p = particles[i];
+    p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 0.08*dt;
+    p.life -= dt;
+    if (p.life<=0) particles.splice(i,1);
+  }
+}
+function drawParticles() {
+  noStroke();
+  for (let p of particles) {
+    let a = map(p.life,0,p.maxLife,0,255);
+    fill(red(p.col),green(p.col),blue(p.col),a);
+    ellipse(p.x,p.y,p.r*(p.life/p.maxLife+0.3));
+  }
+}
+
+// ---------- VARS DE JOGO ----------
+let boostValue = 0, boostTimer = 10.0, inicioPlayed = false;
+let altitude = 0, maxAltitude = 0, flightTime = 0;
+let scrollSpeed = 0;
+let fallSpeed = 0;
+let shakeT = 0;
+let camShakeX=0, camShakeY=0;
+let menuButtons = {}, overButtons = {};
+let lastFrameTime = 0;
+let launchT = 0;
+
+// ---------- SETUP ----------
+function setup() {
+  computeLayout();
+  let cnv = createCanvas(windowWidth, windowHeight);
+  cnv.parent(document.body);
+  pixelDensity(1);
+  loadSave();
+  genStars();
+  rocket = new Rocket();
+  lastFrameTime = millis();
+  setupAudioElements();
+}
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  computeLayout();
+  genStars();
+}
+
+// ---------- LOOP PRINCIPAL ----------
+function draw() {
+  if (assetsLoaded < TOTAL_ASSETS) { background(5,4,12); return; }
+
+  let now = millis();
+  let dt = constrain((now-lastFrameTime)/16.67, 0, 3);
+  lastFrameTime = now;
+
+  background(4,4,10);
+  push();
+  translate(offsetX + camShakeX, camShakeY);
+  noStroke(); fill(4,4,10); rect(-6,0,6,H); rect(W,0,6,H);
+
+  switch(state) {
+    case ST_MENU: drawMenu(dt); break;
+    case ST_NICK: drawGroundBackground(); break;
+    case ST_BOOST: updateBoost(dt); drawBoost(dt); break;
+    case ST_LAUNCH: updateLaunch(dt); drawFlightScene(dt); drawLaunchOverlay(); break;
+    case ST_FLIGHT: updateFlight(dt); drawFlightScene(dt); drawHUD(); break;
+    case ST_FALL: updateFall(dt); drawFlightScene(dt); drawHUD(); break;
+    case ST_OVER: drawFlightScene(dt); drawGameOver(dt); break;
+  }
+  pop();
+
+  if (shakeT>0) {
+    shakeT -= dt;
+    camShakeX = random(-6,6)*constrain(shakeT/10,0,1);
+    camShakeY = random(-6,6)*constrain(shakeT/10,0,1);
+  } else { camShakeX = 0; camShakeY = 0; }
+
+  updateEngineSound();
+
+  noStroke(); fill(150,160,190);
+  textFont('monospace'); textSize(11); textAlign(CENTER,BOTTOM);
+  text('Produzido por Costa Games', windowWidth/2, windowHeight-6);
+}
+
+// ============================================================
+// MENU
+// ============================================================
+function drawMenu(dt) {
+  drawGroundBackground();
+  push(); noStroke(); fill(0,0,0,90); rect(0,0,W,H); pop();
+
+  pixelText('ROCKETMAN', W/2, H*0.18, min(W*0.11,46), color(255,90,90), color(30,10,10));
+  push(); noStroke(); fill(255,230,150); textFont('monospace'); textStyle(BOLD);
+  textAlign(CENTER,CENTER); textSize(min(W*0.045,18));
+  text('rumo à estratosfera!', W/2, H*0.24);
+  pop();
+
+  push(); translate(W/2, H*0.42); rotate(sin(frameCount*0.02)*0.05);
+  rocket.dispH = min(W*0.34, 140);
+  let sx=rocket.x, sy=rocket.y; rocket.x=0; rocket.y=0;
+  rocket.draw();
+  rocket.x=sx; rocket.y=sy;
+  pop();
+
+  push(); noStroke(); textFont('monospace'); textAlign(CENTER,CENTER);
+  fill(255,255,255); textSize(min(W*0.045,17));
+  text('Piloto: ' + (nickname || '---'), W/2, H*0.56);
+  fill(255,220,90);
+  text('Recorde: ' + floor(highScore) + ' m', W/2, H*0.593);
+  pop();
+
+  if (leaderboard.length) {
+    push(); textFont('monospace'); textAlign(CENTER,CENTER); noStroke();
+    fill(200,220,255); textSize(min(W*0.035,13));
+    text('— MELHORES VOOS —', W/2, H*0.64);
+    for (let i=0;i<leaderboard.length;i++) {
+      fill(230,230,240);
+      text((i+1)+'. '+leaderboard[i].name+' - '+leaderboard[i].alt+'m', W/2, H*0.64 + (i+1)*18);
+    }
+    pop();
+  }
+
+  let bx=W/2, by=H*0.81, bw=min(W*0.6,220), bh=54;
+  menuButtons.start = {x:bx-bw/2,y:by-bh/2,w:bw,h:bh};
+  drawButton(menuButtons.start, 'INICIAR', color(90,200,120));
+
+  push(); noStroke(); fill(210,215,230); textFont('monospace'); textSize(min(W*0.032,12));
+  textAlign(CENTER,CENTER);
+  text('Setas/WASD ou arraste para mover · ESPAÇO/toque para impulsionar', W/2, H*0.90);
+  pop();
+}
+function drawButton(b, label, col) {
+  push();
+  stroke(255); strokeWeight(3);
+  fill(col);
+  rectMode(CORNER);
+  rect(b.x,b.y,b.w,b.h,8);
+  pixelText(label, b.x+b.w/2, b.y+b.h/2+1, min(b.w*0.11,20), color(255), color(0,0,0,150));
+  pop();
+}
+
+// ---------- UI DE NICKNAME (DOM) ----------
+function promptForNickname() {
+  let v = window.prompt('Digite seu apelido, piloto (máx. 10 letras):', nickname || '');
+  v = (v || '').trim().toUpperCase().slice(0,10);
+  nickname = v || 'PILOTO';
+  localStorage.setItem('rocketman_nick', nickname);
+  sndClick();
+  state = ST_BOOST;
+  resetBoostPhase();
+}
+
+// ============================================================
+// FASE DE IMPULSO
+// ============================================================
+function resetBoostPhase() {
+  boostValue = 0; boostTimer = 10.0;
+  inicioPlayed = false;
+  rocket = new Rocket();
+  rocket.x = W/2; rocket.y = H*0.68;
+  rocket.dispH = min(W*0.28, 110);
+}
+function updateBoost(dt) {
+  boostTimer -= (dt/60);
+  boostValue = max(0, boostValue - dt*0.22); // decai um pouco mais devagar que antes
+  if (!inicioPlayed && boostTimer <= 4) { inicioPlayed = true; sndInicio(); }
+  if (boostTimer <= 0) { boostTimer = 0; startLaunch(); }
+}
+function tapBoost() {
+  if (state !== ST_BOOST) return;
+  // ainda fica mais "pesado" perto do topo, mas com menos resistência que antes
+  let resistance = map(boostValue, 0, 100, 1, 0.55);
+  boostValue = min(100, boostValue + random(4,7) * resistance);
+  sndTap(boostValue);
+  shakeT = max(shakeT, 2);
+}
+function drawBoost(dt) {
+  drawGroundBackground();
+  push(); noStroke(); fill(0,0,0,70); rect(0,0,W,H); pop();
+  rocket.draw();
+
+  pixelText(ceil(boostTimer)+'', W/2, H*0.10, min(W*0.12,42), color(255,230,90), color(40,25,0));
+  pixelText('APERTE ESPAÇO / TOQUE!', W/2, H*0.17, min(W*0.045,17), color(255,255,255), color(0,0,0,160));
+
+  let bx = W*0.84, bw = W*0.10, by = H*0.28, bh = H*0.48;
+  push();
+  stroke(255); strokeWeight(3); noFill();
+  rectMode(CORNER); rect(bx,by,bw,bh,6);
+  noStroke();
+  let fillH = bh*(boostValue/100);
+  let c1 = color(255,90,90), c2 = color(255,230,90), c3=color(120,240,140);
+  let bc = boostValue<40? c1 : boostValue<75? c2 : c3;
+  fill(bc);
+  rect(bx,by+bh-fillH,bw,fillH,4);
+  pixelText(floor(boostValue)+'%', bx+bw/2, by-16, min(W*0.04,16), color(255), color(0,0,0,160));
+  pop();
+
+  let tb = {x:W*0.08, y:H*0.55, w:W*0.6, h:H*0.22};
+  push(); noStroke();
+  fill(255,255,255, 25+15*sin(frameCount*0.3));
+  rect(tb.x,tb.y,tb.w,tb.h,14);
+  pixelText('TOQUE AQUI', tb.x+tb.w/2, tb.y+tb.h/2, min(W*0.06,22), color(255), color(0,0,0,140));
+  pop();
+  menuButtons.boostZone = tb;
+}
+
+function startLaunch() {
+  rocket.maxFuel = map(boostValue,0,100,900,3400);
+  rocket.fuel = rocket.maxFuel;
+  rocket.dispH = min(W*0.22, 92);
+  altitude = 0; maxAltitude = 0; flightTime = 0;
+  obstacles = []; particles = [];
+  scrollSpeed = map(boostValue,0,100,2.5,7.5);
+  sndLaunch();
+  state = ST_LAUNCH;
+  launchT = 0;
+}
+function updateLaunch(dt) {
+  launchT += dt;
+  rocket.y = lerp(rocket.y, H*0.62, 0.06*dt);
+  if (launchT > 55) state = ST_FLIGHT;
+}
+function drawLaunchOverlay() {
+  pixelText('DECOLAGEM!', W/2, H*0.12, min(W*0.09,34), color(255,230,90), color(60,30,0));
+}
+
+// ============================================================
+// VOO
+// ============================================================
+function updateFlight(dt) {
+  rocket.update(dt);
+
+  let fuelFrac = constrain(rocket.fuel/rocket.maxFuel,0,1);
+  scrollSpeed = 2 + fuelFrac*7;
+  rocket.fuel -= dt;
+  altitude += scrollSpeed * dt * 12;
+  maxAltitude = max(maxAltitude, altitude);
+  flightTime += dt/60;
+
+  let info = currentStageInfo(flightTime);
+  let bandLevel = BAND_LEVEL[info.cur.key] ?? 0;
+
+  spawnTimer -= dt;
+  let interval = map(constrain(flightTime,0,150),0,150,52,18);
+  if (spawnTimer <= 0) {
+    spawnTimer = interval + random(-6,6);
+    let type = pickObstacleType(bandLevel);
+    obstacles.push(new Obstacle(type, bandLevel, altitude));
+  }
+
+  for (let i=obstacles.length-1;i>=0;i--) {
+    let o = obstacles[i];
+    o.update(dt, scrollSpeed);
+    if (o.dead) { obstacles.splice(i,1); continue; }
+    if (!rocket.crashed) {
+      let d = dist(rocket.x,rocket.y,o.x,o.y);
+      if (d < rocket.r + o.hitRadius()) {
+        crashRocket(o.x, o.y);
+        break;
+      }
+    }
+  }
+  updateParticles(dt);
+
+  if (!rocket.crashed && rocket.fuel <= 0) { rocket.fuel = 0; fallSpeed = 1; state = ST_FALL; }
+}
+
+// Colisão fatal: 1 batida = explosão + Game Over imediato
+function crashRocket(ox, oy) {
+  rocket.crashed = true;
+  shakeT = 22;
+  spawnExplosion(ox, oy, 24, [color(255,150,60),color(255,220,90),color(255,80,60),color(255,255,255)]);
+  spawnExplosion(rocket.x, rocket.y, 34, [color(255,150,60),color(255,220,90),color(255,80,60),color(255,255,255)]);
+  sndHit();
+  maxAltitude = max(maxAltitude, altitude);
+  saveScore(maxAltitude);
+  setTimeout(()=>sndGameOver(), 250);
+  state = ST_OVER;
+}
+function updateFall(dt) {
+  rocket.update(dt);
+  fallSpeed += 0.15*dt;
+  scrollSpeed = -fallSpeed;
+  altitude += scrollSpeed*dt*12;
+  for (let i=obstacles.length-1;i>=0;i--) {
+    let o = obstacles[i];
+    o.update(dt, scrollSpeed*0.4);
+    if (o.dead) obstacles.splice(i,1);
+  }
+  updateParticles(dt);
+  if (altitude <= 0) {
+    altitude = 0;
+    spawnExplosion(rocket.x, rocket.y, 30, [color(255,150,60),color(255,220,90),color(255,80,60)]);
+    shakeT = 18;
+    sndGameOver();
+    saveScore(maxAltitude);
+    state = ST_OVER;
+  }
+}
+
+function drawFlightScene(dt) {
+  drawBackground(flightTime);
+  drawTwinkles(flightTime);
+  for (let o of obstacles) o.draw();
+  rocket.draw();
+  drawParticles();
+}
+
+// ---------- HUD ----------
+function drawHUD() {
+  push();
+  textFont('monospace'); noStroke();
+  fill(255,255,255); textAlign(LEFT,TOP); textSize(min(W*0.045,16));
+  text('ALTITUDE', 12, 10);
+  fill(255,220,90); textSize(min(W*0.07,24));
+  text(floor(altitude)+' m', 12, 26);
+
+  textAlign(RIGHT,TOP); fill(200,220,255); textSize(min(W*0.035,13));
+  text('RECORDE '+floor(highScore)+'m', W-12, 10);
+  fill(255,255,255); textSize(min(W*0.035,13));
+  text(nickname || 'PILOTO', W-12, 26);
+
+  let bw = W*0.5, bh=14, bx=W/2-bw/2, by=H-30;
+  stroke(255); strokeWeight(2); noFill();
+  rect(bx,by,bw,bh,4);
+  noStroke();
+  let frac = constrain(rocket.fuel/rocket.maxFuel,0,1);
+  fill(frac>0.4?color(120,220,140):color(255,120,90));
+  rect(bx,by,bw*frac,bh,4);
+  fill(255); textAlign(CENTER,BOTTOM); textSize(min(W*0.03,11));
+  text('IMPULSO', W/2, by-3);
+  pop();
+}
+
+// ============================================================
+// GAME OVER
+// ============================================================
+function drawGameOver(dt) {
+  push();
+  noStroke(); fill(5,5,15,190);
+  rectMode(CORNER); rect(0,0,W,H);
+
+  pixelText('FIM DE JOGO', W/2, H*0.20, min(W*0.09,32), color(255,90,90), color(30,0,0));
+  pixelText('Altitude Máxima', W/2, H*0.31, min(W*0.04,15), color(220,220,240));
+  pixelText(floor(maxAltitude)+' m', W/2, H*0.37, min(W*0.1,38), color(255,230,90), color(50,30,0));
+
+  if (maxAltitude >= highScore && maxAltitude>0) {
+    pixelText('★ NOVO RECORDE! ★', W/2, H*0.43, min(W*0.045,17), color(120,240,150), color(0,30,10));
+  }
+
+  if (leaderboard.length) {
+    push(); textFont('monospace'); textAlign(CENTER,CENTER); noStroke();
+    fill(200,220,255); textSize(min(W*0.035,13));
+    text('— MELHORES VOOS —', W/2, H*0.51);
+    for (let i=0;i<leaderboard.length;i++) {
+      fill(230,230,240);
+      text((i+1)+'. '+leaderboard[i].name+' - '+leaderboard[i].alt+'m', W/2, H*0.51 + (i+1)*18);
+    }
+    pop();
+  }
+
+  let bx=W/2, by=H*0.82, bw=min(W*0.62,230), bh=52;
+  overButtons.retry = {x:bx-bw/2,y:by-bh/2,w:bw,h:bh};
+  drawButton(overButtons.retry, 'JOGAR NOVAMENTE', color(90,200,120));
+  pop();
+}
+
+// ============================================================
+// INPUT
+// ============================================================
+function withinField(px, py) { return { x: px - offsetX, y: py }; }
+function inBox(x,y,b) { return b && x>=b.x && x<=b.x+b.w && y>=b.y && y<=b.y+b.h; }
+
+// Deslocamento vertical aplicado só no TOQUE (mobile): o alvo fica acima do
+// dedo, assim a base do foguete some perto do toque em vez do dedo cobrir o sprite.
+const TOUCH_Y_OFFSET = -90;
+
+function handlePress(px,py,isTouch) {
+  initAudio();
+  let p = withinField(px,py);
+  if (state === ST_MENU) {
+    if (inBox(p.x,p.y,menuButtons.start)) {
+      sndClick();
+      if (!nickname) { promptForNickname(); }
+      else { state = ST_BOOST; resetBoostPhase(); }
+    }
+    return;
+  }
+  if (state === ST_BOOST) { tapBoost(); return; }
+  if (state === ST_FLIGHT || state === ST_FALL || state === ST_LAUNCH) {
+    dragTarget = { x: p.x, y: p.y + (isTouch ? TOUCH_Y_OFFSET : 0) };
+    return;
+  }
+  if (state === ST_OVER) {
+    if (inBox(p.x,p.y,overButtons.retry)) { sndClick(); state = ST_MENU; }
+    return;
+  }
+}
+function handleMove(px,py,isTouch) {
+  if (state === ST_FLIGHT || state === ST_FALL || state === ST_LAUNCH) {
+    let p = withinField(px,py);
+    dragTarget = { x: p.x, y: p.y + (isTouch ? TOUCH_Y_OFFSET : 0) };
+  }
+}
+function handleRelease() { dragTarget = null; }
+
+function mousePressed() { handlePress(mouseX, mouseY, false); }
+function mouseDragged() { handleMove(mouseX, mouseY, false); }
+function mouseReleased() { handleRelease(); }
+
+function touchStarted() {
+  if (touches.length>0) handlePress(touches[0].x, touches[0].y, true); else handlePress(mouseX,mouseY,true);
+  return false;
+}
+function touchMoved() {
+  if (touches.length>0) handleMove(touches[0].x, touches[0].y, true);
+  return false;
+}
+function touchEnded() { handleRelease(); return false; }
+
+function keyPressed() {
+  initAudio();
+  if (key === ' ') {
+    if (state === ST_BOOST) tapBoost();
+    if (state === ST_MENU) {
+      if (!nickname) { promptForNickname(); }
+      else { state = ST_BOOST; resetBoostPhase(); }
+    }
+    if (state === ST_OVER) state = ST_MENU;
+    return false;
+  }
+}
+</script>
+</body>
+</html>
